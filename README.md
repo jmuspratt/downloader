@@ -25,7 +25,7 @@ npm install
 ### Basic Usage
 
 ```bash
-node downloader.js https://example.com
+npm start -- https://example.com
 ```
 
 This will download all images and HTML5 videos from the specified URL to a directory in `_downloads/` named after the URL.
@@ -33,9 +33,9 @@ This will download all images and HTML5 videos from the specified URL to a direc
 ### Custom Output Directory
 
 ```bash
-node downloader.js https://example.com --output ./my-media
+npm start -- https://example.com --output ./my-media
 # or
-node downloader.js https://example.com -o ./my-media
+npm start -- https://example.com -o ./my-media
 ```
 
 ## What Gets Downloaded
