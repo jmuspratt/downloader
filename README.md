@@ -40,12 +40,28 @@ npm start -- https://example.com -o ./my-media
 
 ## What Gets Downloaded
 
-- Images: All `<img>` tags with `src` attributes
-- Videos:
-  - `<video>` tags with `src` attributes
-  - `<source>` tags within `<video>` elements
-  - Video files in `<object>` and `<embed>` tags
-  - Links to video files in `<a>` tags
+The downloader organizes files into separate directories by type:
+
+### Images
+
+- From `<img>` tags
+- CSS background images (inline styles)
+- Background images in stylesheets
+
+### Videos
+
+- `<video>` tags with `src` attributes
+- `<source>` tags within `<video>` elements
+- Video files in `<object>` and `<embed>` tags
+- Links to video files in `<a>` tags
+
+### Fonts
+
+- Web fonts from stylesheets (woff, woff2, ttf, eot, otf)
+
+### Other
+
+- Any other media that doesn't fit the categories above
 
 ## Requirements
 

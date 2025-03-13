@@ -4,11 +4,71 @@ const fs = require("fs");
 const path = require("path");
 const { URL } = require("url");
 
-// Function to download a file (image or video)
-async function downloadFile(url, outputDir, fileType) {
+// Helper function to determine file type based on URL or content type
+function getFileType(url, contentType = "") {
+  const lowerUrl = url.toLowerCase();
+  const ext = path.extname(lowerUrl.split("?")[0]).toLowerCase();
+
+  // Image types
+  const imageExts = [
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".svg",
+    ".webp",
+    ".bmp",
+    ".ico",
+    ".tiff",
+  ];
+  if (imageExts.includes(ext) || contentType.startsWith("image/")) {
+    return "images";
+  }
+
+  // Video types
+  const videoExts = [
+    ".mp4",
+    ".ogv",
+    ".webm",
+    ".mov",
+    ".m4v",
+    ".ogg",
+    ".avi",
+    ".wmv",
+    ".flv",
+  ];
+  if (videoExts.includes(ext) || contentType.startsWith("video/")) {
+    return "videos";
+  }
+
+  // Font types
+  const fontExts = [".woff", ".woff2", ".eot", ".ttf", ".otf"];
+  if (fontExts.includes(ext) || contentType.includes("font")) {
+    return "fonts";
+  }
+
+  // Default to other for anything else
+  return "other";
+}
+
+// Function to download a file
+async function downloadFile(url, baseOutputDir) {
   try {
+    // Get file info before downloading the full content
+    const headResponse = await axios.head(url).catch(() => ({ headers: {} }));
+    const contentType = headResponse.headers["content-type"] || "";
+
+    // Determine file type category
+    const fileType = getFileType(url, contentType);
+
+    // Create subdirectory for the file type if it doesn't exist
+    const outputDir = path.join(baseOutputDir, fileType);
+    if (!fs.existsSync(outputDir)) {
+      fs.mkdirSync(outputDir, { recursive: true });
+    }
+
     // Create a valid filename from the URL
-    const filename = path.basename(url).split("?")[0]; // Remove query parameters
+    const filename = path.basename(url.split("?")[0]); // Remove query parameters
     const outputPath = path.join(outputDir, filename);
 
     // Download the file
@@ -24,7 +84,7 @@ async function downloadFile(url, outputDir, fileType) {
 
     return new Promise((resolve, reject) => {
       writer.on("finish", () => {
-        console.log(`Downloaded ${fileType}: ${filename}`);
+        console.log(`Downloaded ${fileType.slice(0, -1)}: ${filename}`);
         resolve();
       });
       writer.on("error", reject);
@@ -76,12 +136,12 @@ async function downloadMediaFromUrl(targetUrl, customOutputDir = null) {
     }
 
     // Use custom output directory if provided, otherwise use "_downloads/url-based-dirname"
-    const outputDir = customOutputDir
+    const baseOutputDir = customOutputDir
       ? path.resolve(customOutputDir)
       : path.join(__dirname, "_downloads", urlDirName);
 
-    if (!fs.existsSync(outputDir)) {
-      fs.mkdirSync(outputDir, { recursive: true });
+    if (!fs.existsSync(baseOutputDir)) {
+      fs.mkdirSync(baseOutputDir, { recursive: true });
     }
 
     // Fetch the page
@@ -91,99 +151,166 @@ async function downloadMediaFromUrl(targetUrl, customOutputDir = null) {
     // Load the HTML into cheerio
     const $ = cheerio.load(data);
 
-    // Find all img tags for images
-    const imageUrls = [];
+    // Arrays to store all media URLs
+    const mediaUrls = new Set();
+
+    // 1. Find all img tags
     $("img").each((i, element) => {
-      let imageUrl = $(element).attr("src");
-      if (imageUrl) {
-        imageUrl = normalizeUrl(imageUrl, targetUrl);
-        imageUrls.push(imageUrl);
+      let url = $(element).attr("src");
+      if (url) {
+        mediaUrls.add(normalizeUrl(url, targetUrl));
       }
     });
 
-    // Find all video sources (both video tags and source tags within video)
-    const videoUrls = [];
+    // 2. Extract background images from inline styles
+    $("*").each((i, element) => {
+      const style = $(element).attr("style");
+      if (style) {
+        // Match url() patterns in style attributes
+        const matches = style.match(/url\(['"]?([^'")]+)['"]?\)/g) || [];
 
+        for (const match of matches) {
+          // Extract the URL from the url() pattern
+          const urlMatch = match.match(/url\(['"]?([^'")]+)['"]?\)/);
+          if (urlMatch && urlMatch[1] && !urlMatch[1].startsWith("data:")) {
+            mediaUrls.add(normalizeUrl(urlMatch[1], targetUrl));
+          }
+        }
+      }
+    });
+
+    // 3. Find video sources (both video tags and source tags within video)
     // Direct video src attributes
     $("video").each((i, element) => {
-      let videoUrl = $(element).attr("src");
-      if (videoUrl) {
-        videoUrl = normalizeUrl(videoUrl, targetUrl);
-        videoUrls.push(videoUrl);
+      let url = $(element).attr("src");
+      if (url) {
+        mediaUrls.add(normalizeUrl(url, targetUrl));
       }
     });
 
     // Source tags within video elements
     $("video source").each((i, element) => {
-      let videoUrl = $(element).attr("src");
-      if (videoUrl) {
-        videoUrl = normalizeUrl(videoUrl, targetUrl);
-        videoUrls.push(videoUrl);
+      let url = $(element).attr("src");
+      if (url) {
+        mediaUrls.add(normalizeUrl(url, targetUrl));
       }
     });
 
-    // Check for HTML5 video in object and embed tags
+    // 4. Check for HTML5 video in object and embed tags
     $("object, embed").each((i, element) => {
-      let mediaUrl = $(element).attr("src") || $(element).attr("data");
-      if (mediaUrl) {
-        mediaUrl = normalizeUrl(mediaUrl, targetUrl);
+      let url = $(element).attr("src") || $(element).attr("data");
+      if (url) {
+        mediaUrls.add(normalizeUrl(url, targetUrl));
+      }
+    });
 
-        // Check if it's a video file by extension
-        const videoExtensions = [
-          ".mp4",
-          ".ogv",
-          ".webm",
-          ".mov",
-          ".m4v",
-          ".ogg",
-        ];
-        if (
-          videoExtensions.some((ext) => mediaUrl.toLowerCase().endsWith(ext))
-        ) {
-          videoUrls.push(mediaUrl);
+    // 5. Extract media from CSS stylesheets
+    const stylesheetUrls = [];
+    $('link[rel="stylesheet"]').each((i, element) => {
+      const href = $(element).attr("href");
+      if (href) {
+        stylesheetUrls.push(normalizeUrl(href, targetUrl));
+      }
+    });
+
+    // 6. Check style tags
+    $("style").each((i, element) => {
+      const cssText = $(element).html();
+      if (cssText) {
+        // Find all url() patterns in the CSS
+        const matches = cssText.match(/url\(['"]?([^'")]+)['"]?\)/g) || [];
+
+        for (const match of matches) {
+          const urlMatch = match.match(/url\(['"]?([^'")]+)['"]?\)/);
+          if (urlMatch && urlMatch[1] && !urlMatch[1].startsWith("data:")) {
+            mediaUrls.add(normalizeUrl(urlMatch[1], targetUrl));
+          }
         }
       }
     });
 
-    // Look for video URLs in anchor tags
+    // 7. Download CSS files to extract media
+    for (const stylesheetUrl of stylesheetUrls) {
+      try {
+        console.log(`Fetching CSS: ${stylesheetUrl}`);
+        const { data: cssText } = await axios.get(stylesheetUrl);
+
+        // Find all url() patterns in the CSS
+        const matches = cssText.match(/url\(['"]?([^'")]+)['"]?\)/g) || [];
+
+        for (const match of matches) {
+          const urlMatch = match.match(/url\(['"]?([^'")]+)['"]?\)/);
+          if (urlMatch && urlMatch[1] && !urlMatch[1].startsWith("data:")) {
+            mediaUrls.add(normalizeUrl(urlMatch[1], stylesheetUrl));
+          }
+        }
+      } catch (error) {
+        console.error(`Error fetching CSS ${stylesheetUrl}: ${error.message}`);
+      }
+    }
+
+    // 8. Look for media URLs in anchor tags
     $("a").each((i, element) => {
-      let linkUrl = $(element).attr("href");
-      if (linkUrl) {
-        linkUrl = normalizeUrl(linkUrl, targetUrl);
+      let url = $(element).attr("href");
+      if (url) {
+        url = normalizeUrl(url, targetUrl);
 
-        // Check if it's a direct link to a video file
-        const videoExtensions = [
+        // Check if it's a direct link to a media file
+        const mediaExts = [
+          ".jpg",
+          ".jpeg",
+          ".png",
+          ".gif",
           ".mp4",
           ".ogv",
           ".webm",
           ".mov",
           ".m4v",
           ".ogg",
+          ".svg",
+          ".woff",
+          ".woff2",
+          ".eot",
+          ".ttf",
+          ".otf",
         ];
-        if (
-          videoExtensions.some((ext) => linkUrl.toLowerCase().endsWith(ext))
-        ) {
-          videoUrls.push(linkUrl);
+        if (mediaExts.some((ext) => url.toLowerCase().endsWith(ext))) {
+          mediaUrls.add(url);
         }
       }
     });
 
-    // Remove duplicates from video URLs
-    const uniqueVideoUrls = [...new Set(videoUrls)];
+    // Filter out nulls and convert to array
+    const mediaUrlsArray = [...mediaUrls].filter(Boolean);
 
-    console.log(
-      `Found ${imageUrls.length} images and ${uniqueVideoUrls.length} videos.`
-    );
+    console.log(`Found ${mediaUrlsArray.length} media files to download.`);
 
     // Download all media
-    const downloadPromises = [
-      ...imageUrls.map((url) => downloadFile(url, outputDir, "image")),
-      ...uniqueVideoUrls.map((url) => downloadFile(url, outputDir, "video")),
-    ];
-
+    const downloadPromises = mediaUrlsArray.map((url) =>
+      downloadFile(url, baseOutputDir)
+    );
     await Promise.all(downloadPromises);
 
-    console.log(`All media downloaded to ${outputDir}`);
+    // Count files in each directory
+    const stats = {};
+    const types = ["images", "videos", "fonts", "other"];
+
+    for (const type of types) {
+      const typeDir = path.join(baseOutputDir, type);
+      if (fs.existsSync(typeDir)) {
+        const files = fs.readdirSync(typeDir);
+        stats[type] = files.length;
+      } else {
+        stats[type] = 0;
+      }
+    }
+
+    console.log(`\nDownload Summary:`);
+    console.log(`- Images: ${stats.images}`);
+    console.log(`- Videos: ${stats.videos}`);
+    console.log(`- Fonts: ${stats.fonts}`);
+    console.log(`- Other: ${stats.other}`);
+    console.log(`\nAll media downloaded to ${baseOutputDir}`);
   } catch (error) {
     console.error(`Error: ${error.message}`);
   }
